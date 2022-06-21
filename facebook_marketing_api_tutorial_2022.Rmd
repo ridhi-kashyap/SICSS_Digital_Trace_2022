@@ -1,0 +1,262 @@
+---
+title: "Facebook Marketing API"
+author: "Ridhi Kashyap and Jiani Yan"
+date: "18/06/2022"
+output: html_document
+---
+
+This tutorial provides a brief introduction to extracting estimates of users from [Facebook's Marketing application programming interface (API)](https://developers.facebook.com/docs/marketing-apis/overview). The API provides monthly and daily active counts of the number of Facebook users by different targeting criteria, such as age, geography, gender, as well as more detailed targeting by interests and behaviours. These counts are called ad audience estimates as they provide a measure of the potential audience sizes or reach for potential advertisers on Facebook. 
+
+## Examples of Existing Work
+As described in the lecture, these data have been used in a number of applications. Just to name a few, some examples include [monitoring lifestyle diseases](https://dl.acm.org/citation.cfm?id=3091513), [migration (1)](https://onlinelibrary.wiley.com/doi/10.1111/padr.12102), [migration (2)](https://read.dukeupress.edu/demography/article/58/6/2193/284644/A-Framework-for-Estimating-Migrant-Stocks-Using), [migration (3)](https://www.jstor.org/stable/45216967?seq=1),  and [demographic differentials in social media use](https://ojs.aaai.org/index.php/ICWSM/article/view/3263). On our website [www.digitalgendergaps.org](https://www.digitalgendergaps.org/monthly), my collaborators and I use these data to nowcast global gender gaps in internet and mobile phone access, two key global sustainable development indicators for which there is a significant data gap in conventional data sources. Our approach is described [in this paper](https://www.sciencedirect.com/science/article/pii/S0305750X18300883). Other work, such as [this](https://www.pnas.org/content/115/27/6958.short) and [this](https://dl.acm.org/citation.cfm?id=3212698) has also used these data to examine gender inequality. 
+
+## Requirements 
+In order to access these data, you need: 
+(1) A Facebook account
+
+(2) Marketing app with token
+
+(3) Ad account number.
+
+Here is a helpful [step-by-step guide](https://github.com/ridhi-kashyap/SICSS_Digital_Trace_2022/blob/main/Steps_for_creating_FB_Access_Token.pdf) on how to access these credentials prepared by Masoomali Fatehkia. 
+
+Facebook's Marketing API does not as yet have a dedicated R package. There is a Python library ['pysocialwatcher'](https://github.com/joaopalotti/pySocialWatcher) that is available, first developed by Matheus Araujo, with further extensions by Joao Palotti. A helpful tutorial on how to use pysocialwatcher [is available here](https://worldbank.github.io/connectivity_mapping/intro.html). For R, [Sofia Gil-Clavel's 2019 tutorial](https://github.com/SofiaG1l/Using_Facebook_API) provides helpful code to access the data.
+
+More generally, the API documentation from Facebook provides information on the general structure of the calls and how to [provide the targeting specifications](https://developers.facebook.com/docs/marketing-api/targeting-specs/). The [httr package in R](https://cran.r-project.org/web/packages/httr/vignettes/quickstart.html) can be used to query the ad audience estimates, which returns a JSON object. This can be extracted using the jsonlite package. 
+
+The general structure of the URL to request an audience estimate from the FB marketing API is "https://graph.facebook.com/VERSION/act_YOURACT/delivery_estimate?access_token=TOKEN". Here, VERSION would have to be replaced by the current version of the API, which is v.13.3, YOURACT would be your personal ad account number and TOKEN would refer to your personal token. The code below updates and builds on Sofia Gil-Clavel's tutorial. 
+
+```{r setup, include=TRUE}
+#Loading required packages
+library(readr)
+library(dplyr)
+library(jsonlite)
+library(httr)
+
+#Specify version of the API
+version <- "v13.0" 
+
+#Specify your authentication/credentials, 
+#these should be saved separately in a private file
+
+credential<-read.csv("credentials (2).csv", header = FALSE)
+
+token <- credential$V1
+act <- credential$V2
+
+#We specify the basic URL as a string
+Credentials <- paste0('https://graph.facebook.com/',version,'/act_',act,'/delivery_estimate?access_token=',token)
+
+```
+
+The targeting specifications for the API call are included in an argument 'targeting_specs' in the query. Targeting specifications need to be specified in a JSON array -- but we are treating it as a string here in R. So for example, the simplest call about the Facebook audience of a country, for example, Great Britain, would be. We specify other arguments for the query, for example, that we are seeking "reach" estimates and the method to obtain them is "get" (HTTP) in addition to our basic targeting query in a list.
+
+
+```{r, echo = TRUE}
+targeting_spec_simple <- '{"geo_locations":{"countries":["GB"]}}'
+
+query_char <- list(
+  include_headers="false",
+  method="get",
+  optimization_goal="REACH",
+  suppress_http_code=1,
+  targeting_spec = targeting_spec_simple)
+
+```
+
+We use GET from the httr package to obtain the desired estimates, which are returned as a JSON. The command fromJSON extracts them.
+
+```{r echo=TRUE}
+query_val1 <- GET(url = Credentials, query = query_char) %>% content(as="text",encoding = "UTF-8") %>% fromJSON
+query_val1<-query_val1$data
+query_val1
+#The query provides three counts -  1. estimated daily active users (dau)  
+#                                   two monthly active user 
+#                                   2. mau_upper_bound
+#                                   3. mau_lower_bound
+
+query_val1$estimate_dau
+query_val1$estimate_mau_lower_bound
+query_val1$estimate_mau_upper_bound
+```
+We can try a more complex query with more targeting options to obtain the number of women in the UK AND Spain between the ages of 20 and 55 who are on Facebook on mobile and desktop devices, and other conditions. By default, the response uses an AND condition. For repeated queries it is helpful to write some functions: let's write a URL generator for the basic API string, and a query generator that incorporates the relevant parameters we are interested in. 
+
+```{r, echo = TRUE}
+# function 1 : url generator 
+url_generator<-function(version,act,token){
+  url<- paste0('https://graph.facebook.com/',version,'/act_',act,'/delivery_estimate?access_token=', token)
+  return(url)
+}
+
+
+# function 2: query generator 
+target_query_generator<-function(age_min,age_max,country_list,gender){
+  #-------------------------------------------------------------------------
+  # gender:women,men,both
+  # age_max: set it to 0 if an open age group is preferred
+  # country: a list of country 
+  #-------------------------------------------------------------------------
+  
+  # gender
+  gender_dict<- list(women=2,men=1,both=0)
+  if(gender %in% names(gender_dict)){genders=gender_dict[gender]}
+  else{print("please provide one of the values below in gender: [women, men, both]")
+      return()}
+  
+  #country 
+  countries<-''
+  for(country in country_list){countries<-paste0(countries,"\"",country,'\",')}
+  countries<-substr(countries, 1, nchar(countries)-1)
+  
+  # get the target query
+  # open age group
+  if(age_max==0){
+    target_query <- paste0('{"age_min":',age_min,
+                  #',"age_max":',age_max,
+                  ',"genders":[',genders,']',
+                  ',"geo_locations":{"countries":[',countries,'],"location_types":["home","recent"]}}')
+  }else{
+    target_query <- paste0('{"age_min":',age_min,
+                  ',"age_max":',age_max,
+                  ',"genders":[',genders,']',
+                  ',"geo_locations":{"countries":[',countries,'],"location_types":["home","recent"]}}')}
+  
+  
+  # generate query
+  query <- list(include_headers="false",method="get",optimization_goal="REACH",suppress_http_code=1,targeting_spec = target_query)
+  
+  return(query)
+}
+```
+
+Now we apply functions to get the female audience of US+UK, aging from 20 to 55
+
+```{r}
+
+url<-url_generator(version='v13.0',act,token)
+query<-target_query_generator(age_min = 20,age_max = 55,
+                              country_list = c("GB","US"),
+                              gender = "women")
+
+query_outcome <- GET(url = url, query = query) %>% content(as="text",encoding="UTF-8") %>% fromJSON
+query_val<-query_outcome$data
+
+cat(paste("Estimated dau        =",query_val$estimate_dau,
+          "\nEstimated mau Upper  =",query_val$estimate_mau_lower_bound,
+          "\nEstimated mau Lower  =",query_val$estimate_mau_upper_bound))
+```
+
+If we wanted to collect counts for each country separately, we would have to loop over a vector of country codes or other characteristics. In this loop, be sure to pause between queries (using commands such as Sys.sleep()), of at least 8 seconds, to ensure that you are not blocked due to rate limiting. 
+
+We can use the Facebook Marketing Search API to get obtain tables of targeting specifications (e.g. demographics, behaviours). The URL for this is "https://graph.facebook.com/v13.0/search". 
+
+Here we create three examples of querying the specifications
+
+1. First, we request details on available "behaviors". 
+
+```{r, echo = TRUE}
+search_url <- "https://graph.facebook.com/v13.0/search"
+fb_behaviour_tab <-GET(url = search_url,
+  query=list(
+    type='adTargetingCategory',
+    class='behaviors',
+    access_token=token,
+    limit=2000)) %>%content(as="text", encoding="UTF-8")%>%fromJSON
+
+fb_behaviour_tab$data[1:10, ]
+
+```
+
+2. Now we query the FB with all the available regions within US Or UK 
+
+```{r}
+search_url <- "https://graph.facebook.com/v13.0/search"
+fb_region_tab <-GET(url = search_url,
+  query=list(
+    type='adgeolocation',
+    location_types='region',
+    country_code='US', # specify the country code here 
+    access_token=token,
+    limit=2000)) %>%content(as="text", encoding="UTF-8")%>%fromJSON
+
+fb_region_tab$data
+```
+
+3. Lastly, we ask FB to return all available countries 
+
+```{r}
+search_url <- "https://graph.facebook.com/v13.0/search"
+country_search <-GET(url = search_url,
+  query=list(
+    type='adgeolocation',
+    location_types='country',
+    access_token=token,
+    limit=1000)) %>%content(as="text", encoding="UTF-8")%>%fromJSON
+
+country_search$data
+```
+We can specify exclusions in addition to inclusions, and also specify OR conditions using the flexible_spec queries. More details are available [here](https://developers.facebook.com/docs/marketing-api/targeting-specs/#flexible).
+
+
+Now as a final trial, we write a loop to collect data from 5 countries and all genders for certain age groups sepereately
+
+|:--:|:----:|
+|Country|JP,US,GB,IT,UA|
+|Gender|Female, Male, Both|
+|Age Groups|18+|
+
+There will be 5 (countries)\*3 (genders)\*1 (age group) = 15 calls together and we will store them into a data frame
+
+```{r}
+
+# Specify the target
+
+country_lst<- c("JP","US","GB","IT","UA")
+age_min_lst<-c(18)
+age_max_lst<-c(0)
+gender_lst<-c("women","men","both")
+
+url<-url_generator(version='v13.0',act,token)
+
+# create a dataframe 
+customised_search<-data.frame(matrix(ncol = 7, nrow = 0))
+colnames(customised_search)<-c("Country","Gender","Age_Min","Age_Max","DAU","MAU_Upper","MAU_Lower")
+
+# Loop
+count=1
+for(country in country_lst){
+  for(gender in gender_lst){
+    for(age_index in 1:length(age_min_lst)){
+      
+      # Generate the query
+      age_min<-age_min_lst[age_index]
+      age_max<-age_max_lst[age_index]
+      target_query <- target_query_generator(age_min = age_min,age_max = age_max, country_list = country,gender = gender)
+
+      query_outcome <- GET(url = url, query = target_query) %>% content(as="text",encoding="UTF-8") %>% fromJSON
+      query_val<-query_outcome$data
+
+
+      cat(paste0(count,"/",length(country_lst)*length(gender_lst)*length(age_min_lst),
+                " Now we deal with country=",country," age_min=",age_min," age_max=",age_max," gender=",gender,'\n'))
+      
+      #store into the Data Frame
+      if(is.null(query_val)){
+        # if it fails, we will store 0s in the last three columns to avoid the whole loop failing 
+        cat("NULL Found, store 0s instead \n")
+        customised_search[nrow(customised_search)+1,]<-c(country,gender,age_min,age_max, 0,0,0)
+      }else{
+        customised_search[nrow(customised_search)+1,]<-c(country,gender,age_min,age_max,
+                                                       query_val$estimate_dau,
+                                                       query_val$estimate_mau_lower_bound,
+                                                       query_val$estimate_mau_upper_bound)
+      }
+      
+      count<-count+1
+      Sys.sleep(8) # sleep 8 seconds between each call
+    } 
+  }
+  
+}
+
+```
